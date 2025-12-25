@@ -1,0 +1,43 @@
+# Binance USD-M Futures Orderbook Recorder Configuration
+
+# Symbols to record (erweiterbar auf N Symbole)
+symbols:
+  - BTCUSDT
+
+# Snapshot Settings
+snapshot_interval_ms: 100
+book_depth: 1000
+rest_snapshot_limit: 1000
+
+# WebSocket Streams
+ws_depth_stream: depth@100ms
+ws_trade_stream: trade
+
+# Data Storage
+data_root: ./data
+chunk_seconds: 60
+
+# Writer Queue Settings
+writer_queue_max: 600
+fail_on_backpressure: true
+
+# Normalization (BTCUSDT defaults)
+# Preis: 0.10 USD pro Tick -> price_scale = 1 (1 Dezimalstelle)
+# Menge: 0.001 BTC pro Lot -> qty_scale = 3 (3 Dezimalstellen)
+price_scale: 1
+qty_scale: 3
+
+# Alternative: tick_size / step_size
+# price_tick_size: 0.1
+# qty_step_size: 0.001
+
+# Logging
+log_level: INFO
+
+# Binance API Endpoints
+binance_rest_url: https://fapi.binance.com
+binance_ws_url: wss://fstream.binance.com/ws
+
+# Health Monitoring
+health_log_interval_s: 10
+
