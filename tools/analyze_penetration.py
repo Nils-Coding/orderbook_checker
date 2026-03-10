@@ -45,7 +45,10 @@ def load_snapshots(data_root: Path, symbol: str) -> pd.DataFrame:
     dfs = []
     for f in files:
         try:
-            df = pq.read_table(f).to_pandas()
+            # Use ParquetFile.read() to avoid pyarrow.dataset schema merge issues
+            # (observed as string vs dictionary merge errors even for single files).
+            tbl = pq.ParquetFile(f).read()
+            df = tbl.to_pandas()
             dfs.append(df)
         except Exception as e:
             logger.warning(f"Failed to load {f}: {e}")
@@ -78,7 +81,11 @@ def load_trades(data_root: Path, symbol: str) -> pd.DataFrame:
     dfs = []
     for f in files:
         try:
-            df = pq.read_table(f).to_pandas()
+            # Use ParquetFile.read() to avoid pyarrow.dataset schema merge issues
+            # (observed as string vs dictionary merge errors even for single files).
+            tbl = pq.ParquetFile(f).read()
+
+            df = tbl.to_pandas()
             dfs.append(df)
         except Exception as e:
             logger.warning(f"Failed to load {f}: {e}")
@@ -157,9 +164,13 @@ def analyze_trades(
 
     # Calculate penetration for each trade
     results = []
+    skipped_no_snapshot = 0
     for idx, row in merged.iterrows():
-        if pd.isna(row.get("bids_qty_lots")) or row["bids_qty_lots"] is None:
-            # No matching snapshot found
+        # No matching snapshot found: merge_asof fills snapshot columns with NaN (scalar),
+        # but the column itself typically contains list/array values when present.
+        bids_val = row.get("bids_qty_lots")
+        if bids_val is None or (pd.api.types.is_scalar(bids_val) and pd.isna(bids_val)):
+            skipped_no_snapshot += 1
             continue
 
         # Determine which side based on is_buyer_maker
@@ -185,6 +196,7 @@ def analyze_trades(
 
     result_df = pd.DataFrame(results)
     logger.info(f"Calculated penetration for {len(result_df)} trades")
+
     return result_df
 
 

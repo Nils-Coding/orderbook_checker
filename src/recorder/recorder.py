@@ -233,12 +233,18 @@ class Recorder:
             return
 
         try:
-            # Parse trade event
-            # Binance trade format: {s, p, q, T, m, ...}
+            # Parse trade event - supports both @trade and @aggTrade formats
+            # @trade format: {t, s, p, q, T, m, ...}
+            # @aggTrade format: {a, s, p, q, f, l, T, m}
             ts_ms = event.get("T", 0)  # Trade time in ms
             price = float(event.get("p", 0))
             qty = float(event.get("q", 0))
             is_buyer_maker = event.get("m", False)
+            
+            # aggTrade specific fields (defaults to 0 for @trade stream)
+            agg_trade_id = event.get("a", 0)      # Aggregate trade ID
+            first_trade_id = event.get("f", 0)   # First trade ID in aggregate
+            last_trade_id = event.get("l", 0)    # Last trade ID in aggregate
 
             trade = TradeRecord(
                 ts_ns=ts_ms * 1_000_000,  # Convert ms to ns
@@ -246,6 +252,9 @@ class Recorder:
                 price_ticks=self.config.price_to_ticks(price),
                 qty_lots=self.config.qty_to_lots(qty),
                 is_buyer_maker=is_buyer_maker,
+                agg_trade_id=agg_trade_id,
+                first_trade_id=first_trade_id,
+                last_trade_id=last_trade_id,
             )
 
             # Enqueue trade (non-blocking)

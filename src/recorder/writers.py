@@ -20,13 +20,17 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class TradeRecord:
-    """Trade data record."""
+    """Trade data record (supports both @trade and @aggTrade)."""
 
     ts_ns: int
     symbol: str
     price_ticks: int
     qty_lots: int
     is_buyer_maker: bool
+    # aggTrade specific fields (0 if from @trade stream)
+    agg_trade_id: int = 0
+    first_trade_id: int = 0
+    last_trade_id: int = 0
 
 
 class SnapshotWriter:
@@ -407,6 +411,9 @@ class TradeWriter:
             "price_ticks": trade.price_ticks,
             "qty_lots": trade.qty_lots,
             "is_buyer_maker": trade.is_buyer_maker,
+            "agg_trade_id": trade.agg_trade_id,
+            "first_trade_id": trade.first_trade_id,
+            "last_trade_id": trade.last_trade_id,
         })
 
         self.trades_written += 1
@@ -454,6 +461,9 @@ class TradeWriter:
             ("price_ticks", pa.int64()),
             ("qty_lots", pa.int64()),
             ("is_buyer_maker", pa.bool_()),
+            ("agg_trade_id", pa.int64()),
+            ("first_trade_id", pa.int64()),
+            ("last_trade_id", pa.int64()),
         ])
 
         arrays = {
@@ -462,6 +472,9 @@ class TradeWriter:
             "price_ticks": pa.array([r["price_ticks"] for r in self._chunk_rows], type=pa.int64()),
             "qty_lots": pa.array([r["qty_lots"] for r in self._chunk_rows], type=pa.int64()),
             "is_buyer_maker": pa.array([r["is_buyer_maker"] for r in self._chunk_rows], type=pa.bool_()),
+            "agg_trade_id": pa.array([r["agg_trade_id"] for r in self._chunk_rows], type=pa.int64()),
+            "first_trade_id": pa.array([r["first_trade_id"] for r in self._chunk_rows], type=pa.int64()),
+            "last_trade_id": pa.array([r["last_trade_id"] for r in self._chunk_rows], type=pa.int64()),
         }
 
         return pa.table(arrays, schema=schema)
