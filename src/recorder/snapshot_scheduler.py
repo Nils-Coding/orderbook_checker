@@ -3,9 +3,12 @@
 import asyncio
 import logging
 import time
-from typing import Callable, Awaitable, Optional
+from typing import Callable, Awaitable, Optional, TYPE_CHECKING
 
 from .orderbook import Orderbook, OrderbookSnapshot
+
+if TYPE_CHECKING:
+    from .sync import OrderbookSync
 
 logger = logging.getLogger(__name__)
 
@@ -15,6 +18,7 @@ class SnapshotScheduler:
     Schedules orderbook snapshots at fixed intervals.
     
     - Triggers snapshot every 100ms (configurable)
+    - Uses Binance event timestamp (E field) for accurate timing
     - Does NOT block on I/O
     - Sends snapshots to callback (which enqueues to writer)
     """
@@ -28,6 +32,7 @@ class SnapshotScheduler:
         self.orderbook = orderbook
         self.interval_ms = interval_ms
         self.on_snapshot = on_snapshot
+        self.sync: Optional["OrderbookSync"] = None  # Set by Recorder after init
 
         self._running = False
         self._task: Optional[asyncio.Task] = None
@@ -98,7 +103,9 @@ class SnapshotScheduler:
 
     async def _take_snapshot(self) -> None:
         """Take a snapshot and send to callback."""
-        snapshot = self.orderbook.get_snapshot()
+        # Use Binance event timestamp if available, otherwise fall back to local time
+        event_ts_ns = self.sync.last_event_ts_ns if self.sync else 0
+        snapshot = self.orderbook.get_snapshot(event_ts_ns=event_ts_ns)
 
         if self.on_snapshot:
             # Callback returns False if queue is full (backpressure)

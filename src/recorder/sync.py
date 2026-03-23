@@ -78,12 +78,18 @@ class OrderbookSync:
         self._snapshot_last_update_id: int = 0
         self._prev_u: int = 0
         self._first_event_applied: bool = False
+        self._last_event_ts_ns: int = 0  # Binance event timestamp (E field) in nanoseconds
 
         self.stats = SyncStats()
 
     @property
     def state(self) -> SyncState:
         return self._state
+
+    @property
+    def last_event_ts_ns(self) -> int:
+        """Last Binance event timestamp in nanoseconds (from 'E' field)."""
+        return self._last_event_ts_ns
 
     def _set_state(self, new_state: SyncState) -> None:
         """Transition to new state with logging and callback."""
@@ -136,6 +142,7 @@ class OrderbookSync:
         U = event.get("U", 0)  # First update ID in event
         u = event.get("u", 0)  # Last update ID in event
         pu = event.get("pu", 0)  # Previous update ID
+        E = event.get("E", 0)  # Event timestamp in milliseconds (Binance server time)
 
         # Check sequence: pu must equal previous u
         if pu != self._prev_u:
@@ -149,6 +156,7 @@ class OrderbookSync:
         # Apply diff
         self.orderbook.apply_diff(event)
         self._prev_u = u
+        self._last_event_ts_ns = E * 1_000_000  # Convert ms to ns
         self.stats.events_processed += 1
         self.stats.last_update_id = u
         return True

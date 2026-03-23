@@ -98,6 +98,7 @@ class Recorder:
             interval_ms=self.config.snapshot_interval_ms,
             on_snapshot=self._on_snapshot,
         )
+        self.scheduler.sync = self.sync  # Link to sync for Binance event timestamps
 
         # Initialize WebSocket clients
         self.depth_client = WSDepthClient(

@@ -126,14 +126,18 @@ class Orderbook:
         while len(self._asks) > self.max_depth:
             self._asks.popitem()  # Remove last item (highest ask)
 
-    def get_snapshot(self) -> OrderbookSnapshot:
+    def get_snapshot(self, event_ts_ns: int = 0) -> OrderbookSnapshot:
         """
         Get current orderbook state as snapshot.
+        
+        Args:
+            event_ts_ns: Binance event timestamp in nanoseconds. If 0, uses local time.
+                         This should come from the 'E' field of Depth WebSocket events.
         
         Returns exactly 1000 levels per side, with padding if needed.
         Prices stored as delta from best bid/ask.
         """
-        ts_ns = time.time_ns()
+        ts_ns = event_ts_ns if event_ts_ns > 0 else time.time_ns()
 
         # Get best prices
         best_bid_ticks = -self._bids.peekitem(0)[0] if self._bids else 0

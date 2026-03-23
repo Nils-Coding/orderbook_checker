@@ -5,6 +5,7 @@ env/
 
 # Data (zu groß für Git)
 data/
+reports/
 
 # Python cache
 __pycache__/
