@@ -33,59 +33,68 @@ gcloud services enable cloudbuild.googleapis.com --project="${PROJECT_ID}"
 # Build and push Docker image
 echo ""
 echo "Building Docker image..."
-gcloud builds submit \
+gcloud builds submit . \
     --project="${PROJECT_ID}" \
-    --tag="${IMAGE_NAME}" \
-    --timeout=600 \
-    -f docker/daily-report/Dockerfile \
-    .
+    --config=docker/daily-report/cloudbuild.yaml
 
 # Create/Update Cloud Run Job
 echo ""
 echo "Creating Cloud Run Job..."
-gcloud run jobs create "${JOB_NAME}" \
-    --project="${PROJECT_ID}" \
-    --region="${REGION}" \
-    --image="${IMAGE_NAME}" \
-    --memory="2Gi" \
-    --cpu="1" \
-    --max-retries=1 \
-    --task-timeout="30m" \
-    --set-env-vars="GCS_BUCKET=${GCS_BUCKET}" \
-    --service-account="${SERVICE_ACCOUNT}" \
-    2>/dev/null || \
-gcloud run jobs update "${JOB_NAME}" \
-    --project="${PROJECT_ID}" \
-    --region="${REGION}" \
-    --image="${IMAGE_NAME}" \
-    --memory="2Gi" \
-    --cpu="1" \
-    --max-retries=1 \
-    --task-timeout="30m" \
-    --set-env-vars="GCS_BUCKET=${GCS_BUCKET}" \
-    --service-account="${SERVICE_ACCOUNT}"
+
+# Check if job exists
+if gcloud run jobs describe "${JOB_NAME}" --project="${PROJECT_ID}" --region="${REGION}" &>/dev/null; then
+    echo "Job exists, updating..."
+    gcloud run jobs update "${JOB_NAME}" \
+        --project="${PROJECT_ID}" \
+        --region="${REGION}" \
+        --image="${IMAGE_NAME}" \
+        --memory="2Gi" \
+        --cpu="1" \
+        --max-retries=1 \
+        --task-timeout="30m" \
+        --set-env-vars="GCS_BUCKET=${GCS_BUCKET}" \
+        --service-account="${SERVICE_ACCOUNT}"
+else
+    echo "Creating new job..."
+    gcloud run jobs create "${JOB_NAME}" \
+        --project="${PROJECT_ID}" \
+        --region="${REGION}" \
+        --image="${IMAGE_NAME}" \
+        --memory="2Gi" \
+        --cpu="1" \
+        --max-retries=1 \
+        --task-timeout="30m" \
+        --set-env-vars="GCS_BUCKET=${GCS_BUCKET}" \
+        --service-account="${SERVICE_ACCOUNT}"
+fi
 
 # Create Cloud Scheduler job to trigger daily at 04:00 UTC
 # (Later than before to allow full day of data, away from peak hours)
 echo ""
 echo "Creating Cloud Scheduler trigger..."
-gcloud scheduler jobs create http "${SCHEDULER_NAME}" \
-    --project="${PROJECT_ID}" \
-    --location="${REGION}" \
-    --schedule="0 4 * * *" \
-    --uri="https://${REGION}-run.googleapis.com/apis/run.googleapis.com/v1/namespaces/${PROJECT_ID}/jobs/${JOB_NAME}:run" \
-    --http-method=POST \
-    --oauth-service-account-email="${SERVICE_ACCOUNT}" \
-    --description="Trigger daily report generation at 04:00 UTC" \
-    2>/dev/null || \
-gcloud scheduler jobs update http "${SCHEDULER_NAME}" \
-    --project="${PROJECT_ID}" \
-    --location="${REGION}" \
-    --schedule="0 4 * * *" \
-    --uri="https://${REGION}-run.googleapis.com/apis/run.googleapis.com/v1/namespaces/${PROJECT_ID}/jobs/${JOB_NAME}:run" \
-    --http-method=POST \
-    --oauth-service-account-email="${SERVICE_ACCOUNT}" \
-    --description="Trigger daily report generation at 04:00 UTC"
+
+# Check if scheduler job exists
+if gcloud scheduler jobs describe "${SCHEDULER_NAME}" --project="${PROJECT_ID}" --location="${REGION}" &>/dev/null; then
+    echo "Scheduler exists, updating..."
+    gcloud scheduler jobs update http "${SCHEDULER_NAME}" \
+        --project="${PROJECT_ID}" \
+        --location="${REGION}" \
+        --schedule="0 4 * * *" \
+        --uri="https://${REGION}-run.googleapis.com/apis/run.googleapis.com/v1/namespaces/${PROJECT_ID}/jobs/${JOB_NAME}:run" \
+        --http-method=POST \
+        --oauth-service-account-email="${SERVICE_ACCOUNT}" \
+        --description="Trigger daily report generation at 04:00 UTC"
+else
+    echo "Creating new scheduler..."
+    gcloud scheduler jobs create http "${SCHEDULER_NAME}" \
+        --project="${PROJECT_ID}" \
+        --location="${REGION}" \
+        --schedule="0 4 * * *" \
+        --uri="https://${REGION}-run.googleapis.com/apis/run.googleapis.com/v1/namespaces/${PROJECT_ID}/jobs/${JOB_NAME}:run" \
+        --http-method=POST \
+        --oauth-service-account-email="${SERVICE_ACCOUNT}" \
+        --description="Trigger daily report generation at 04:00 UTC"
+fi
 
 echo ""
 echo "========================================"
