@@ -14,7 +14,7 @@ ws_depth_stream: depth@100ms
 ws_trade_stream: aggTrade
 
 # Data Storage (local Mac Mini path)
-data_root: /Users/michaelscheland/data/orderbook
+data_root: /Users/schemi/data/orderbook
 chunk_seconds: 60
 
 # Writer Queue Settings
