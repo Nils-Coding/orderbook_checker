@@ -48,6 +48,11 @@ class Config:
     # Health Monitoring
     health_log_interval_s: int = 10
 
+    # Notifications (ntfy.sh)
+    notify_enabled: bool = False
+    notify_topic: str = ""
+    host_name: str = "unknown"
+
     def __post_init__(self) -> None:
         """Convert data_root to Path if string."""
         if isinstance(self.data_root, str):

@@ -1,0 +1,41 @@
+# Binance USD-M Futures Orderbook Recorder Configuration -- Mac Mini
+
+# Symbols to record
+symbols:
+  - BTCUSDT
+
+# Snapshot Settings
+snapshot_interval_ms: 100
+book_depth: 1000
+rest_snapshot_limit: 1000
+
+# WebSocket Streams
+ws_depth_stream: depth@100ms
+ws_trade_stream: aggTrade
+
+# Data Storage (local Mac Mini path)
+data_root: /Users/michaelscheland/data/orderbook
+chunk_seconds: 60
+
+# Writer Queue Settings
+writer_queue_max: 600
+fail_on_backpressure: true
+
+# Normalization (BTCUSDT defaults)
+price_scale: 1
+qty_scale: 3
+
+# Logging
+log_level: INFO
+
+# Binance API Endpoints
+binance_rest_url: https://fapi.binance.com
+binance_ws_url: wss://fstream.binance.com/ws
+
+# Health Monitoring
+health_log_interval_s: 10
+
+# Notifications (ntfy.sh)
+notify_enabled: true
+notify_topic: "orderbook-rec-7259a4a1"  # Same topic as GCP VM
+host_name: "macmini"

@@ -18,6 +18,7 @@ from .ws_trade_client import WSTradeClient
 from .snapshot_scheduler import SnapshotScheduler
 from .writers import SnapshotWriter, TradeWriter, TradeRecord
 from .health import HealthMonitor
+from .notify import Notifier
 
 logger = logging.getLogger(__name__)
 
@@ -53,6 +54,11 @@ class Recorder:
         self.snapshot_writer: Optional[SnapshotWriter] = None
         self.trade_writer: Optional[TradeWriter] = None
         self.health: Optional[HealthMonitor] = None
+        self.notifier: Notifier = Notifier(
+            topic=config.notify_topic,
+            host_name=config.host_name,
+            enabled=config.notify_enabled,
+        )
 
         self._session: Optional[aiohttp.ClientSession] = None
         self._running = False
@@ -127,10 +133,12 @@ class Recorder:
         self.health.depth_client = self.depth_client
         self.health.trade_client = self.trade_client
         self.health.scheduler = self.scheduler
+        self.health.notifier = self.notifier
 
         # Start all components
         self._running = True
 
+        await self.notifier.start()
         await self.snapshot_writer.start()
         await self.trade_writer.start()
         await self.scheduler.start()
@@ -139,6 +147,7 @@ class Recorder:
         await self.trade_client.start()
 
         logger.info(f"Recorder started for {self.symbol}")
+        await self.notifier.recorder_started(self.symbol)
 
     async def stop(self) -> None:
         """Stop all components gracefully."""
@@ -162,6 +171,8 @@ class Recorder:
             await self._session.close()
 
         logger.info(f"Recorder stopped for {self.symbol}")
+        await self.notifier.recorder_stopped(self.symbol)
+        await self.notifier.stop()
 
     async def run_until_shutdown(self) -> int:
         """Run until shutdown signal received. Returns exit code."""
@@ -170,6 +181,7 @@ class Recorder:
             return 0
         except Exception as e:
             logger.exception(f"Recorder error: {e}")
+            await self.notifier.recorder_error(self.symbol, str(e))
             return 1
 
     def request_shutdown(self) -> None:
@@ -181,13 +193,16 @@ class Recorder:
     def _on_sync_state_change(self, old: SyncState, new: SyncState) -> None:
         """Handle sync state transitions."""
         if new == SyncState.RESYNCING:
-            # Disable snapshot capture during resync
             if self.scheduler:
                 self.scheduler.disable()
+            asyncio.create_task(
+                self.notifier.sync_lost(self.symbol, f"{old.name} -> RESYNCING")
+            )
         elif new == SyncState.LIVE:
-            # Enable snapshot capture when live
             if self.scheduler:
                 self.scheduler.enable()
+            if old != SyncState.SYNCING:
+                asyncio.create_task(self.notifier.sync_live(self.symbol))
 
     async def _on_sync_live(self) -> None:
         """Called when sync reaches LIVE state."""
@@ -309,6 +324,10 @@ async def run_recorder(config: Config) -> int:
     except Exception as e:
         logger.exception(f"Recorder error: {e}")
         exit_code = 1
+        for r in recorders:
+            await r.notifier.recorder_error(
+                r.symbol, f"Fatal: {e}"
+            )
 
     finally:
         # Stop all recorders

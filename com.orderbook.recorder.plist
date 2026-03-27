@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+
+  <key>Label</key>
+  <string>com.orderbook.recorder</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/michaelscheland/Development/Nils/orderbook_checker/venv/bin/python</string>
+    <string>-m</string>
+    <string>recorder.cli</string>
+    <string>record</string>
+    <string>--config</string>
+    <string>/Users/michaelscheland/Development/Nils/orderbook_checker/config-macmini.yaml</string>
+  </array>
+
+  <key>WorkingDirectory</key>
+  <string>/Users/michaelscheland/Development/Nils/orderbook_checker/src</string>
+
+  <key>RunAtLoad</key>
+  <true/>
+
+  <key>KeepAlive</key>
+  <true/>
+
+  <key>StandardOutPath</key>
+  <string>/Users/michaelscheland/data/orderbook/logs/recorder-stdout.log</string>
+
+  <key>StandardErrorPath</key>
+  <string>/Users/michaelscheland/data/orderbook/logs/recorder-stderr.log</string>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/Users/michaelscheland/Development/Nils/orderbook_checker/venv/bin:/usr/local/bin:/usr/bin:/bin</string>
+    <key>PYTHONPATH</key>
+    <string>/Users/michaelscheland/Development/Nils/orderbook_checker/src</string>
+  </dict>
+
+  <key>ThrottleInterval</key>
+  <integer>10</integer>
+
+</dict>
+</plist>

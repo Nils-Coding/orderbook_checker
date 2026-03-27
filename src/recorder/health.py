@@ -4,9 +4,12 @@ import asyncio
 import logging
 import time
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Optional, TYPE_CHECKING
 
 from .sync import OrderbookSync, SyncState
+
+if TYPE_CHECKING:
+    from .notify import Notifier
 
 logger = logging.getLogger(__name__)
 
@@ -69,6 +72,7 @@ class HealthMonitor:
         self.depth_client: Optional["WSDepthClient"] = None
         self.trade_client: Optional["WSTradeClient"] = None
         self.scheduler: Optional["SnapshotScheduler"] = None
+        self.notifier: Optional["Notifier"] = None
 
     async def start(self) -> None:
         """Start health monitoring."""
@@ -157,4 +161,14 @@ class HealthMonitor:
             logger.warning(f"Snapshot queue fill high: {stats.snapshot_queue_pct:.1f}%")
         if stats.trade_queue_pct > 50:
             logger.warning(f"Trade queue fill high: {stats.trade_queue_pct:.1f}%")
+
+        if self.notifier:
+            if stats.snapshot_queue_pct > 80:
+                asyncio.create_task(
+                    self.notifier.queue_pressure("snapshot", stats.snapshot_queue_pct)
+                )
+            if stats.trade_queue_pct > 80:
+                asyncio.create_task(
+                    self.notifier.queue_pressure("trade", stats.trade_queue_pct)
+                )
 
