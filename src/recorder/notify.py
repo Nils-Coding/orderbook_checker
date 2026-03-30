@@ -134,6 +134,25 @@ class Notifier:
             tags=["white_check_mark"],
         )
 
+    async def sync_recovery_retry(self, symbol: str, attempt: int, delay_s: float) -> None:
+        await self.send(
+            title="Sync recovery retrying",
+            message=f"{symbol}: recovery attempt {attempt} failed, retry in {delay_s:.1f}s",
+            priority="high",
+            tags=["warning"],
+            cooldown_key="sync_recovery_retry",
+            cooldown_s=120,
+        )
+
+    async def sync_recovered(self, symbol: str, attempts: int) -> None:
+        await self.send(
+            title="Sync recovered",
+            message=f"{symbol} recovered to LIVE after {attempts} attempt(s)",
+            tags=["white_check_mark"],
+            cooldown_key="sync_recovered",
+            cooldown_s=30,
+        )
+
     async def queue_pressure(self, queue_name: str, fill_pct: float) -> None:
         await self.send(
             title=f"Queue pressure: {queue_name}",

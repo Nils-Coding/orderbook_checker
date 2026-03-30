@@ -63,6 +63,8 @@ class Recorder:
         self._session: Optional[aiohttp.ClientSession] = None
         self._running = False
         self._shutdown_event = asyncio.Event()
+        self._sync_recovery_task: Optional[asyncio.Task] = None
+        self._sync_recovery_attempts = 0
 
     async def start(self) -> None:
         """Initialize and start all components."""
@@ -153,6 +155,12 @@ class Recorder:
         """Stop all components gracefully."""
         logger.info(f"Stopping recorder for {self.symbol}")
         self._running = False
+        if self._sync_recovery_task and not self._sync_recovery_task.done():
+            self._sync_recovery_task.cancel()
+            try:
+                await self._sync_recovery_task
+            except asyncio.CancelledError:
+                pass
 
         # Stop in reverse order
         if self.depth_client:
@@ -198,11 +206,14 @@ class Recorder:
             asyncio.create_task(
                 self.notifier.sync_lost(self.symbol, f"{old.name} -> RESYNCING")
             )
+        elif new == SyncState.BUFFERING:
+            self._ensure_sync_recovery_task(reason=f"{old.name} -> BUFFERING")
         elif new == SyncState.LIVE:
             if self.scheduler:
                 self.scheduler.enable()
             if old != SyncState.SYNCING:
                 asyncio.create_task(self.notifier.sync_live(self.symbol))
+            self._sync_recovery_attempts = 0
 
     async def _on_sync_live(self) -> None:
         """Called when sync reaches LIVE state."""
@@ -229,15 +240,85 @@ class Recorder:
         logger.info("Depth WebSocket connected")
         if self.sync and self._session:
             await self.sync.start()
-            # Small delay to buffer some events before fetching snapshot
-            await asyncio.sleep(0.5)
-            await self.sync.fetch_and_sync(self._session)
+            self._ensure_sync_recovery_task(reason="depth websocket connected")
 
     async def _on_depth_disconnect(self) -> None:
         """Handle depth WebSocket disconnection."""
         logger.warning("Depth WebSocket disconnected")
         if self.sync:
             await self.sync.trigger_resync("websocket disconnected")
+
+    def _ensure_sync_recovery_task(self, reason: str) -> None:
+        """Ensure one background task is trying to recover sync to LIVE."""
+        if not self._running or not self.sync or not self._session:
+            return
+        if self.sync.state == SyncState.LIVE:
+            return
+        if self._sync_recovery_task and not self._sync_recovery_task.done():
+            return
+        logger.info(f"Starting sync recovery loop for {self.symbol} ({reason})")
+        self._sync_recovery_task = asyncio.create_task(self._sync_recovery_loop())
+
+    def _should_notify_recovery(self) -> bool:
+        """Notify only after at least one real resync happened."""
+        return bool(self.sync and self.sync.stats.resync_count > 0)
+
+    async def _sync_recovery_loop(self) -> None:
+        """
+        Try to reach LIVE from BUFFERING/SYNCING with bounded retry backoff.
+
+        This prevents the recorder from getting stuck in BUFFERING after
+        a sequence-gap-triggered resync where no new connect callback fires.
+        """
+        try:
+            while self._running and self.sync and self._session:
+                if self.sync.state == SyncState.LIVE:
+                    return
+
+                if self.sync.state in (SyncState.DISCONNECTED, SyncState.RESYNCING):
+                    await asyncio.sleep(0.5)
+                    continue
+
+                if self.sync.state in (SyncState.FETCH_SNAPSHOT, SyncState.SYNCING):
+                    await asyncio.sleep(0.5)
+                    continue
+
+                # BUFFERING: fetch snapshot + attempt to sync.
+                self._sync_recovery_attempts += 1
+                attempt = self._sync_recovery_attempts
+                logger.warning(
+                    f"Sync recovery attempt {attempt} for {self.symbol} (state=BUFFERING)"
+                )
+
+                # Buffer a few websocket events before REST snapshot fetch.
+                await asyncio.sleep(0.5)
+                success = await self.sync.fetch_and_sync(self._session)
+                if success and self.sync.state == SyncState.LIVE:
+                    if attempt > 1:
+                        logger.info(
+                            f"Sync recovery succeeded for {self.symbol} after {attempt} attempts"
+                        )
+                        if self._should_notify_recovery():
+                            asyncio.create_task(
+                                self.notifier.sync_recovered(self.symbol, attempt)
+                            )
+                    return
+
+                delay_s = min(30.0, float(2 ** min(6, attempt - 1)))
+                logger.warning(
+                    f"Sync recovery attempt {attempt} did not reach LIVE for {self.symbol}; "
+                    f"retry in {delay_s:.1f}s"
+                )
+                if self._should_notify_recovery():
+                    asyncio.create_task(
+                        self.notifier.sync_recovery_retry(self.symbol, attempt, delay_s)
+                    )
+                await asyncio.sleep(delay_s)
+        except asyncio.CancelledError:
+            logger.debug(f"Sync recovery loop cancelled for {self.symbol}")
+            raise
+        except Exception as e:
+            logger.exception(f"Sync recovery loop error for {self.symbol}: {e}")
 
     def _on_trade_event(self, event: dict) -> None:
         """Handle trade event from WebSocket."""
