@@ -66,6 +66,11 @@ class Recorder:
         self._sync_recovery_task: Optional[asyncio.Task] = None
         self._sync_recovery_attempts = 0
 
+        # Set when a critical background task dies unexpectedly. Causes a
+        # non-zero exit code so the service manager (systemd) restarts us
+        # instead of the process lingering while recording is dead.
+        self._fatal_error: Optional[BaseException] = None
+
     async def start(self) -> None:
         """Initialize and start all components."""
         logger.info(f"Starting recorder for {self.symbol}")
@@ -136,6 +141,7 @@ class Recorder:
         self.health.trade_client = self.trade_client
         self.health.scheduler = self.scheduler
         self.health.notifier = self.notifier
+        self.health.data_root = self.config.data_root
 
         # Start all components
         self._running = True
@@ -147,6 +153,13 @@ class Recorder:
         await self.health.start()
         await self.depth_client.start()
         await self.trade_client.start()
+
+        # Supervise critical background tasks. If any of these dies
+        # unexpectedly (e.g. writer hit ENOSPC, scheduler hit backpressure),
+        # fail loudly and trigger a restart instead of silently losing data.
+        self._supervise_task("snapshot_writer", self.snapshot_writer._task)
+        self._supervise_task("trade_writer", self.trade_writer._task)
+        self._supervise_task("scheduler", self.scheduler._task)
 
         logger.info(f"Recorder started for {self.symbol}")
         await self.notifier.recorder_started(self.symbol)
@@ -186,7 +199,8 @@ class Recorder:
         """Run until shutdown signal received. Returns exit code."""
         try:
             await self._shutdown_event.wait()
-            return 0
+            # A fatal background-task failure exits non-zero so systemd restarts.
+            return 1 if self._fatal_error is not None else 0
         except Exception as e:
             logger.exception(f"Recorder error: {e}")
             await self.notifier.recorder_error(self.symbol, str(e))
@@ -195,6 +209,60 @@ class Recorder:
     def request_shutdown(self) -> None:
         """Request graceful shutdown."""
         self._shutdown_event.set()
+
+    def _supervise_task(self, name: str, task: Optional[asyncio.Task]) -> None:
+        """Attach a done-callback that detects unexpected death of a task."""
+        if task is None:
+            return
+        task.add_done_callback(lambda t: self._on_critical_task_done(name, t))
+
+    def _on_critical_task_done(self, name: str, task: asyncio.Task) -> None:
+        """Handle a critical background task ending while we are still running."""
+        # During normal shutdown these tasks are expected to stop.
+        if not self._running or self._shutdown_event.is_set():
+            return
+
+        # Figure out what went wrong.
+        error: Optional[BaseException] = None
+        if task.cancelled():
+            error = asyncio.CancelledError()
+        else:
+            try:
+                error = task.exception()
+            except asyncio.CancelledError:
+                error = asyncio.CancelledError()
+
+        # Writers record their own fatal error (they catch it to avoid a
+        # silent task death); prefer that for a precise message.
+        writer = None
+        if name == "snapshot_writer":
+            writer = self.snapshot_writer
+        elif name == "trade_writer":
+            writer = self.trade_writer
+        if writer is not None and writer.fatal_error is not None:
+            error = writer.fatal_error
+
+        self._fatal_error = error or RuntimeError(
+            f"Critical task '{name}' stopped unexpectedly"
+        )
+        logger.error(
+            f"Critical task '{name}' ended unexpectedly: {self._fatal_error!r} "
+            f"-- shutting down for restart"
+        )
+
+        # Fire-and-forget notification (notifier has its own session).
+        if name in ("snapshot_writer", "trade_writer"):
+            asyncio.create_task(
+                self.notifier.writer_failed(self.symbol, name, str(self._fatal_error))
+            )
+        else:
+            asyncio.create_task(
+                self.notifier.recorder_error(
+                    self.symbol, f"{name} stopped: {self._fatal_error}"
+                )
+            )
+
+        self.request_shutdown()
 
     # === Callbacks ===
 
@@ -354,11 +422,28 @@ class Recorder:
                 last_trade_id=last_trade_id,
             )
 
-            # Enqueue trade (non-blocking)
-            asyncio.create_task(self.trade_writer.enqueue(trade))
+            # Enqueue trade (non-blocking). Wrapped so a backpressure failure
+            # escalates instead of dying in an orphaned task.
+            asyncio.create_task(self._enqueue_trade(trade))
 
         except Exception as e:
             logger.warning(f"Failed to process trade: {e}")
+
+    async def _enqueue_trade(self, trade: TradeRecord) -> None:
+        """Enqueue a trade and escalate backpressure failures to a restart."""
+        try:
+            await self.trade_writer.enqueue(trade)
+        except RuntimeError as e:
+            if not self._running or self._shutdown_event.is_set():
+                return
+            self._fatal_error = e
+            logger.error(
+                f"Trade writer backpressure: {e} -- shutting down for restart"
+            )
+            asyncio.create_task(
+                self.notifier.writer_failed(self.symbol, "trade_writer", str(e))
+            )
+            self.request_shutdown()
 
 
 async def run_recorder(config: Config) -> int:

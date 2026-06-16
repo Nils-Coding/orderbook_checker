@@ -71,6 +71,11 @@ class SnapshotWriter:
         self.chunks_written = 0
         self.queue_full_count = 0
 
+        # Set if the writer loop dies on an unrecoverable error (e.g. disk full).
+        # The recorder supervises this so it can fail loudly and restart instead
+        # of silently leaving the queue to fill forever.
+        self.fatal_error: Optional[BaseException] = None
+
     def _get_output_path(self, ts: datetime) -> Path:
         """Get output path for given timestamp."""
         return (
@@ -142,23 +147,33 @@ class SnapshotWriter:
 
     async def _run(self) -> None:
         """Main writer loop."""
-        while self._running or not self._queue.empty():
-            try:
-                snapshot = await asyncio.wait_for(
-                    self._queue.get(),
-                    timeout=1.0
-                )
+        try:
+            while self._running or not self._queue.empty():
+                try:
+                    snapshot = await asyncio.wait_for(
+                        self._queue.get(),
+                        timeout=1.0
+                    )
 
-                if snapshot is None:
-                    # Sentinel received
-                    break
+                    if snapshot is None:
+                        # Sentinel received
+                        break
 
-                await self._write_snapshot(snapshot)
+                    await self._write_snapshot(snapshot)
 
-            except asyncio.TimeoutError:
-                # Check if chunk needs rotation
-                if self._chunk_rows and self._should_rotate():
-                    await self._flush_chunk()
+                except asyncio.TimeoutError:
+                    # Check if chunk needs rotation
+                    if self._chunk_rows and self._should_rotate():
+                        await self._flush_chunk()
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            # An unrecoverable error (e.g. OSError ENOSPC "No space left on
+            # device") must NOT silently kill this task and leave the queue
+            # filling to 100% forever. Record it so the recorder's supervision
+            # can fail loudly, notify, and trigger a restart.
+            self.fatal_error = e
+            logger.exception(f"SnapshotWriter loop crashed, stopping writer: {e}")
 
     async def _write_snapshot(self, snapshot: OrderbookSnapshot) -> None:
         """Process a single snapshot."""
@@ -309,6 +324,9 @@ class TradeWriter:
         self.chunks_written = 0
         self.queue_full_count = 0
 
+        # Set if the writer loop dies on an unrecoverable error (e.g. disk full).
+        self.fatal_error: Optional[BaseException] = None
+
     def _get_output_path(self, ts: datetime) -> Path:
         """Get output path for given timestamp."""
         return (
@@ -377,21 +395,30 @@ class TradeWriter:
 
     async def _run(self) -> None:
         """Main writer loop."""
-        while self._running or not self._queue.empty():
-            try:
-                trade = await asyncio.wait_for(
-                    self._queue.get(),
-                    timeout=1.0
-                )
+        try:
+            while self._running or not self._queue.empty():
+                try:
+                    trade = await asyncio.wait_for(
+                        self._queue.get(),
+                        timeout=1.0
+                    )
 
-                if trade is None:
-                    break
+                    if trade is None:
+                        break
 
-                await self._write_trade(trade)
+                    await self._write_trade(trade)
 
-            except asyncio.TimeoutError:
-                if self._chunk_rows and self._should_rotate():
-                    await self._flush_chunk()
+                except asyncio.TimeoutError:
+                    if self._chunk_rows and self._should_rotate():
+                        await self._flush_chunk()
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            # Unrecoverable error (e.g. OSError ENOSPC). Record it so the
+            # recorder's supervision can fail loudly and restart instead of
+            # silently dropping all trades.
+            self.fatal_error = e
+            logger.exception(f"TradeWriter loop crashed, stopping writer: {e}")
 
     async def _write_trade(self, trade: TradeRecord) -> None:
         """Process a single trade."""

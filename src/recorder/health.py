@@ -2,8 +2,10 @@
 
 import asyncio
 import logging
+import shutil
 import time
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Optional, TYPE_CHECKING
 
 from .sync import OrderbookSync, SyncState
@@ -12,6 +14,18 @@ if TYPE_CHECKING:
     from .notify import Notifier
 
 logger = logging.getLogger(__name__)
+
+# Disk-space thresholds (early warning before the disk fills up). A warning
+# fires below LOW, an urgent alert below CRITICAL -- whichever (GB or %) hits
+# first, so it works on both small and large disks.
+DISK_LOW_GB = 10.0
+DISK_LOW_PCT = 10.0
+DISK_CRITICAL_GB = 3.0
+DISK_CRITICAL_PCT = 5.0
+
+# Number of consecutive health cycles with a near-full queue AND no progress
+# before we treat the writer as stalled (blocked, but not crashed).
+STALL_CYCLES = 3
 
 
 @dataclass
@@ -73,6 +87,11 @@ class HealthMonitor:
         self.trade_client: Optional["WSTradeClient"] = None
         self.scheduler: Optional["SnapshotScheduler"] = None
         self.notifier: Optional["Notifier"] = None
+        self.data_root: Optional[Path] = None
+
+        # Stall detection state
+        self._prev_snapshots_written = 0
+        self._snapshot_stall_cycles = 0
 
     async def start(self) -> None:
         """Start health monitoring."""
@@ -171,4 +190,59 @@ class HealthMonitor:
                 asyncio.create_task(
                     self.notifier.queue_pressure("trade", stats.trade_queue_pct)
                 )
+
+        self._check_disk_space()
+        self._check_writer_stall(stats)
+
+    def _check_disk_space(self) -> None:
+        """Warn early if the data disk is running low (before writes fail)."""
+        if not self.notifier or self.data_root is None:
+            return
+        try:
+            usage = shutil.disk_usage(self.data_root)
+        except OSError as e:
+            logger.warning(f"Could not check disk usage for {self.data_root}: {e}")
+            return
+
+        free_gb = usage.free / (1024 ** 3)
+        free_pct = (usage.free / usage.total) * 100 if usage.total else 0.0
+
+        if free_gb < DISK_CRITICAL_GB or free_pct < DISK_CRITICAL_PCT:
+            logger.error(
+                f"Disk space CRITICAL: {free_gb:.1f} GB ({free_pct:.1f}%) free "
+                f"on {self.data_root}"
+            )
+            asyncio.create_task(
+                self.notifier.disk_space_critical(free_gb, free_pct, str(self.data_root))
+            )
+        elif free_gb < DISK_LOW_GB or free_pct < DISK_LOW_PCT:
+            logger.warning(
+                f"Disk space low: {free_gb:.1f} GB ({free_pct:.1f}%) free "
+                f"on {self.data_root}"
+            )
+            asyncio.create_task(
+                self.notifier.disk_space_low(free_gb, free_pct, str(self.data_root))
+            )
+
+    def _check_writer_stall(self, stats: HealthStats) -> None:
+        """Detect a writer that is alive but blocked (queue full, no progress)."""
+        if not self.notifier:
+            return
+        if stats.snapshot_queue_pct >= 95 and (
+            stats.snapshots_written == self._prev_snapshots_written
+        ):
+            self._snapshot_stall_cycles += 1
+        else:
+            self._snapshot_stall_cycles = 0
+        self._prev_snapshots_written = stats.snapshots_written
+
+        if self._snapshot_stall_cycles >= STALL_CYCLES:
+            logger.error(
+                f"Snapshot writer appears STALLED: queue at "
+                f"{stats.snapshot_queue_pct:.0f}% with no progress for "
+                f"{self._snapshot_stall_cycles} cycles"
+            )
+            asyncio.create_task(
+                self.notifier.writer_stalled("snapshot", stats.snapshot_queue_pct)
+            )
 

@@ -155,10 +155,77 @@ class Notifier:
 
     async def queue_pressure(self, queue_name: str, fill_pct: float) -> None:
         await self.send(
-            title=f"Queue pressure: {queue_name}",
-            message=f"{queue_name} queue at {fill_pct:.1f}%",
+            title=f"Queue pressure: {queue_name} writer",
+            message=(
+                f"The {queue_name} writer queue is {fill_pct:.0f}% full. "
+                f"The writer cannot keep up with incoming data -- the most "
+                f"likely cause is a full disk or slow/blocked disk I/O. "
+                f"If this stays high, recording will stall and no data will be "
+                f"written. Check free disk space on the recorder host."
+            ),
             priority="high",
             tags=["warning"],
             cooldown_key=f"queue_{queue_name}",
             cooldown_s=300,
+        )
+
+    async def writer_failed(self, symbol: str, writer_name: str, error: str) -> None:
+        await self.send(
+            title=f"Writer FAILED: {writer_name}",
+            message=(
+                f"{symbol}: the {writer_name} writer crashed and STOPPED writing "
+                f"data to disk.\n"
+                f"Reason: {error}\n"
+                f"Recording is interrupted. The recorder will exit and restart; "
+                f"check free disk space and the recorder service status NOW."
+            ),
+            priority="urgent",
+            tags=["rotating_light"],
+            cooldown_key=f"writer_failed_{writer_name}",
+            cooldown_s=60,
+        )
+
+    async def writer_stalled(self, queue_name: str, fill_pct: float) -> None:
+        await self.send(
+            title=f"Writer STALLED: {queue_name}",
+            message=(
+                f"The {queue_name} writer queue has been ~{fill_pct:.0f}% full "
+                f"for a while and NO new data is being written. The writer is "
+                f"likely blocked on disk I/O (full disk or stuck write). "
+                f"Recording is effectively stopped -- check the recorder host."
+            ),
+            priority="urgent",
+            tags=["rotating_light"],
+            cooldown_key=f"writer_stalled_{queue_name}",
+            cooldown_s=300,
+        )
+
+    async def disk_space_low(self, free_gb: float, free_pct: float, path: str) -> None:
+        await self.send(
+            title="Disk space low",
+            message=(
+                f"Only {free_gb:.1f} GB ({free_pct:.0f}%) free on {path}.\n"
+                f"At ~3-5 GB/day this disk will fill up soon and recording will "
+                f"stop. Verify the GCS sync + cleanup job is running and removing "
+                f"already-uploaded local files."
+            ),
+            priority="high",
+            tags=["warning"],
+            cooldown_key="disk_low",
+            cooldown_s=1800,
+        )
+
+    async def disk_space_critical(self, free_gb: float, free_pct: float, path: str) -> None:
+        await self.send(
+            title="Disk space CRITICAL",
+            message=(
+                f"Only {free_gb:.1f} GB ({free_pct:.0f}%) free on {path}!\n"
+                f"Writes will fail very soon (ENOSPC) and recording will stop. "
+                f"Free up space NOW by removing local data already uploaded to "
+                f"GCS, or grow the disk."
+            ),
+            priority="urgent",
+            tags=["rotating_light"],
+            cooldown_key="disk_critical",
+            cooldown_s=600,
         )
