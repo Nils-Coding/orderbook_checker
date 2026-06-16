@@ -1,26 +1,35 @@
 #!/usr/bin/env bash
-# Sync locally recorded Parquet data to GCS and clean up already-uploaded files.
+# Robust sync of locally recorded Parquet data to GCS, with cleanup + alerting.
 #
-# Strategy (prevents the "disk fills up -> writes fail -> recording stops" loop):
-#   1. Mirror local data -> GCS bucket via `gsutil rsync` (WITHOUT -d, so a
-#      local delete never removes anything from the bucket).
-#   2. ONLY on a successful upload: delete local Parquet files older than
-#      RETENTION_DAYS. They are safely in the bucket; the most recent data is
-#      kept so the running recorder is never disturbed and a small window is
-#      available for manual recovery.
-#   3. On upload failure: delete NOTHING (keep the local backlog until the
-#      problem is fixed -> manual re-upload possible), send an ntfy alert, and
-#      exit non-zero.
+# Supersedes the older ~/sync_to_gcs_robust.sh. Keeps the good parts of it
+# (timeouts, structured logging, GCS heartbeat) and ADDS the two things that
+# were missing and caused the June outage:
+#   1. RETENTION CLEANUP: after a successful upload, delete local Parquet files
+#      older than RETENTION_DAYS (they are safely in the bucket). Without this
+#      the disk fills up at ~3-5 GB/day and writes eventually fail (ENOSPC).
+#   2. ntfy ALERT on sync failure, so a broken sync is noticed within the hour.
 #
-# Intended to run hourly via cron. Example crontab line:
-#   5 * * * * /home/michaelscheland/orderbook_checker/scripts/sync_to_gcs.sh >> /home/michaelscheland/orderbook_checker/data/logs/sync.log 2>&1
+# rsync runs WITHOUT -d, so deleting local files never removes them from GCS.
+# On failure NOTHING is deleted (local backlog is kept for manual re-upload).
+#
+# Run hourly via cron, e.g.:
+#   0 * * * * /home/michaelscheland/orderbook_checker/scripts/sync_to_gcs.sh >> /home/michaelscheland/orderbook_checker/data/logs/sync_cron.log 2>&1
 
 set -uo pipefail
 
-DATA_ROOT="${DATA_ROOT:-/home/michaelscheland/orderbook_checker/data}"
-GCS_BUCKET="${GCS_BUCKET:-gs://orderflow-data-lake/orderbook-checker}"
+BUCKET="${BUCKET:-gs://orderflow-data-lake/orderbook-checker}"
+DATA_DIR="${DATA_DIR:-/home/michaelscheland/orderbook_checker/data}"
 RETENTION_DAYS="${RETENTION_DAYS:-1}"
 CONFIG_FILE="${CONFIG_FILE:-/home/michaelscheland/orderbook_checker/config.yaml}"
+
+LOG_DIR="$DATA_DIR/logs"
+SYNC_LOG="$LOG_DIR/sync.log"
+HEARTBEAT_FILE="$BUCKET/heartbeat/orderbook-recorder.json"
+TIMESTAMP=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+
+mkdir -p "$LOG_DIR" 2>/dev/null || true
+
+log() { echo "$TIMESTAMP $1" >> "$SYNC_LOG"; }
 
 # --- ntfy helper (reads topic/host from config.yaml, overridable via env) ---
 read_cfg() { grep -E "^$1:" "$CONFIG_FILE" 2>/dev/null | head -1 | sed -E 's/^[^:]+:[[:space:]]*"?([^"#]*)"?.*/\1/' | xargs; }
@@ -39,29 +48,85 @@ notify() {
         "https://ntfy.sh/${NTFY_TOPIC}" >/dev/null 2>&1 || true
 }
 
-echo "[$(date -u +%FT%TZ)] Starting GCS sync from ${DATA_ROOT} -> ${GCS_BUCKET}"
-
-ok=true
-for sub in snapshots trades; do
-    if [ -d "${DATA_ROOT}/${sub}" ]; then
-        gsutil -m rsync -r "${DATA_ROOT}/${sub}" "${GCS_BUCKET}/${sub}" || ok=false
-    fi
-done
-
-if [ "$ok" != true ]; then
-    echo "ERROR: gsutil rsync failed; keeping all local files, no cleanup."
+fail() {
+    local msg="$1"
+    log "ERROR: $msg"
     notify "GCS sync FAILED" \
-        "gsutil rsync to ${GCS_BUCKET} failed. Local data is KEPT (no cleanup) so it can be re-uploaded once fixed. Check VM network / gcloud auth / disk space." \
+        "${msg}. Local data is KEPT (no cleanup) so it can be re-uploaded once fixed. Check VM network / gcloud auth / disk space." \
         "urgent" "rotating_light"
     exit 1
+}
+
+log "=========================================="
+log "Starting sync"
+
+if [ ! -d "$DATA_DIR/snapshots" ] || [ ! -d "$DATA_DIR/trades" ]; then
+    fail "Data directories not found under $DATA_DIR"
 fi
 
-echo "Sync OK. Removing local Parquet files older than ${RETENTION_DAYS} day(s) (already uploaded)."
+SNAP_BEFORE=$(find "$DATA_DIR/snapshots" -name "*.parquet" 2>/dev/null | wc -l)
+TRADE_BEFORE=$(find "$DATA_DIR/trades" -name "*.parquet" 2>/dev/null | wc -l)
+log "Local files before sync: snapshots=$SNAP_BEFORE, trades=$TRADE_BEFORE"
+
+log "Syncing snapshots..."
+timeout 600 gsutil -m rsync -r "$DATA_DIR/snapshots" "$BUCKET/snapshots/" >> "$SYNC_LOG" 2>&1 \
+    || fail "Snapshot sync failed or timed out"
+log "Snapshots synced"
+
+log "Syncing trades..."
+timeout 300 gsutil -m rsync -r "$DATA_DIR/trades" "$BUCKET/trades/" >> "$SYNC_LOG" 2>&1 \
+    || fail "Trade sync failed or timed out"
+log "Trades synced"
+
+# Reports are non-critical (and may not exist).
+if [ -d "$DATA_DIR/reports" ]; then
+    log "Syncing reports..."
+    timeout 60 gsutil -m rsync -r "$DATA_DIR/reports" "$BUCKET/reports/" >> "$SYNC_LOG" 2>&1 \
+        || log "WARNING: Report sync failed (non-critical)"
+fi
+
+# --- Retention cleanup: only AFTER successful snapshot + trade upload ---
+log "Cleanup: removing local Parquet files older than ${RETENTION_DAYS} day(s) (already uploaded)."
 for sub in snapshots trades; do
-    [ -d "${DATA_ROOT}/${sub}" ] || continue
-    find "${DATA_ROOT}/${sub}" -type f -name '*.parquet' -mtime "+${RETENTION_DAYS}" -delete 2>/dev/null
-    # Remove now-empty hour/date directories left behind.
-    find "${DATA_ROOT}/${sub}" -type d -empty -delete 2>/dev/null
+    find "$DATA_DIR/$sub" -type f -name '*.parquet' -mtime "+${RETENTION_DAYS}" -delete 2>/dev/null || true
+    find "$DATA_DIR/$sub" -type d -empty -delete 2>/dev/null || true
 done
 
-echo "[$(date -u +%FT%TZ)] GCS sync + cleanup complete."
+# --- Heartbeat with metadata ---
+SNAP_AFTER=$(find "$DATA_DIR/snapshots" -name "*.parquet" 2>/dev/null | wc -l)
+TRADE_AFTER=$(find "$DATA_DIR/trades" -name "*.parquet" 2>/dev/null | wc -l)
+DISK_USAGE=$(du -sh "$DATA_DIR" 2>/dev/null | cut -f1)
+DISK_AVAIL=$(df -h "$DATA_DIR" 2>/dev/null | awk 'NR==2{print $4}')
+RECORDER_STATUS=$(systemctl is-active orderbook-recorder 2>/dev/null || echo "unknown")
+
+HEARTBEAT_JSON=$(cat << EOF
+{
+  "timestamp": "$TIMESTAMP",
+  "status": "ok",
+  "hostname": "$(hostname)",
+  "snapshots_count": $SNAP_AFTER,
+  "trades_count": $TRADE_AFTER,
+  "disk_usage": "$DISK_USAGE",
+  "disk_available": "$DISK_AVAIL",
+  "recorder_status": "$RECORDER_STATUS"
+}
+EOF
+)
+
+log "Writing heartbeat..."
+echo "$HEARTBEAT_JSON" | gsutil cp - "$HEARTBEAT_FILE" 2>> "$SYNC_LOG" \
+    || fail "Failed to write heartbeat"
+
+gsutil cat "$HEARTBEAT_FILE" > /dev/null 2>&1 \
+    || fail "Heartbeat validation failed (cannot read back)"
+
+# Warn (don't fail) if the recorder is not active -- recording may be down even
+# though the sync itself works.
+if [ "$RECORDER_STATUS" != "active" ]; then
+    notify "Recorder not active" \
+        "The orderbook-recorder service is '${RECORDER_STATUS}' (not active). Recording may be stopped even though GCS sync works. Check the service." \
+        "high" "warning"
+fi
+
+log "Sync completed successfully (snapshots=$SNAP_AFTER, trades=$TRADE_AFTER, free=$DISK_AVAIL)"
+log "=========================================="
