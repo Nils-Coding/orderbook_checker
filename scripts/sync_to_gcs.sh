@@ -60,9 +60,11 @@ fail() {
 log "=========================================="
 log "Starting sync"
 
-if [ ! -d "$DATA_DIR/snapshots" ] || [ ! -d "$DATA_DIR/trades" ]; then
-    fail "Data directories not found under $DATA_DIR"
-fi
+# Ensure base directories exist. The recorder may not have created the trades
+# dir yet (e.g. no trades recorded so far), and the cleanup below must never
+# leave a base dir missing for the next run.
+mkdir -p "$DATA_DIR/snapshots" "$DATA_DIR/trades" 2>/dev/null \
+    || fail "Cannot create data directories under $DATA_DIR"
 
 SNAP_BEFORE=$(find "$DATA_DIR/snapshots" -name "*.parquet" 2>/dev/null | wc -l)
 TRADE_BEFORE=$(find "$DATA_DIR/trades" -name "*.parquet" 2>/dev/null | wc -l)
@@ -89,7 +91,9 @@ fi
 log "Cleanup: removing local Parquet files older than ${RETENTION_DAYS} day(s) (already uploaded)."
 for sub in snapshots trades; do
     find "$DATA_DIR/$sub" -type f -name '*.parquet' -mtime "+${RETENTION_DAYS}" -delete 2>/dev/null || true
-    find "$DATA_DIR/$sub" -type d -empty -delete 2>/dev/null || true
+    # -mindepth 1 so the base dir ($DATA_DIR/$sub) itself is never removed,
+    # only empty partition subdirectories below it.
+    find "$DATA_DIR/$sub" -mindepth 1 -type d -empty -delete 2>/dev/null || true
 done
 
 # --- Heartbeat with metadata ---
