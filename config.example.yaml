@@ -18,7 +18,8 @@ data_root: ./data
 chunk_seconds: 60
 
 # Writer Queue Settings
-writer_queue_max: 600
+writer_queue_max: 600       # snapshot writer queue (snapshots are large)
+trade_queue_max: 10000      # trade writer queue (trades are tiny & high-rate)
 fail_on_backpressure: true
 
 # Normalization (BTCUSDT defaults)

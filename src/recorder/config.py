@@ -28,6 +28,11 @@ class Config:
 
     # Writer Queue Settings
     writer_queue_max: int = 600
+    # Trade events (especially the individual @trade stream) arrive at a much
+    # higher rate than snapshots, and trade records are tiny (~hundreds of bytes
+    # vs. ~tens of KB for a 1000-level snapshot). The trade writer therefore
+    # gets a much larger buffer to absorb bursts without triggering backpressure.
+    trade_queue_max: int = 10000
     fail_on_backpressure: bool = True
 
     # Normalization

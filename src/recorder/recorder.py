@@ -90,7 +90,7 @@ class Recorder:
         self.trade_writer = TradeWriter(
             data_root=self.config.data_root,
             symbol=self.symbol,
-            queue_max=self.config.writer_queue_max,
+            queue_max=self.config.trade_queue_max,
             chunk_seconds=self.config.chunk_seconds,
             fail_on_backpressure=self.config.fail_on_backpressure,
         )
