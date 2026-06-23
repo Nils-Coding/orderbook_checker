@@ -200,6 +200,22 @@ class Notifier:
             cooldown_s=300,
         )
 
+    async def trades_stalled(self, minutes: float) -> None:
+        await self.send(
+            title="Trades STALLED",
+            message=(
+                f"The orderbook is LIVE and the trade WebSocket is connected, "
+                f"but NO trades have been recorded for ~{minutes:.0f} min. "
+                f"The trade stream is delivering no data (e.g. a Binance stream "
+                f"issue like the aggTrade outage). Snapshots are unaffected. "
+                f"Check the trade stream / ws_trade_stream config."
+            ),
+            priority="urgent",
+            tags=["rotating_light"],
+            cooldown_key="trades_stalled",
+            cooldown_s=1800,
+        )
+
     async def disk_space_low(self, free_gb: float, free_pct: float, path: str) -> None:
         await self.send(
             title="Disk space low",

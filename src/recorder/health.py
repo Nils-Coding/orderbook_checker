@@ -27,6 +27,13 @@ DISK_CRITICAL_PCT = 5.0
 # before we treat the writer as stalled (blocked, but not crashed).
 STALL_CYCLES = 3
 
+# Consecutive cycles with the orderbook LIVE and the trade WS connected but no
+# new trades recorded, before alerting. At 10s/cycle this is ~5 min -- well
+# below any real BTCUSDT trade gap, but enough to avoid false positives.
+# Catches a silent trade-stream outage (e.g. the aggTrade stream delivering
+# nothing) that snapshot/queue/disk monitoring would never notice.
+TRADE_STALL_CYCLES = 30
+
 
 @dataclass
 class HealthStats:
@@ -92,6 +99,8 @@ class HealthMonitor:
         # Stall detection state
         self._prev_snapshots_written = 0
         self._snapshot_stall_cycles = 0
+        self._prev_trades_written = 0
+        self._trade_stall_cycles = 0
 
     async def start(self) -> None:
         """Start health monitoring."""
@@ -193,6 +202,7 @@ class HealthMonitor:
 
         self._check_disk_space()
         self._check_writer_stall(stats)
+        self._check_trade_flow(stats)
 
     def _check_disk_space(self) -> None:
         """Warn early if the data disk is running low (before writes fail)."""
@@ -245,4 +255,28 @@ class HealthMonitor:
             asyncio.create_task(
                 self.notifier.writer_stalled("snapshot", stats.snapshot_queue_pct)
             )
+
+    def _check_trade_flow(self, stats: HealthStats) -> None:
+        """Detect a silent trade-stream outage (LIVE + connected but no trades)."""
+        if not self.notifier:
+            return
+        # Only meaningful when we should actually be receiving trades.
+        if stats.sync_state != SyncState.LIVE or not stats.trade_connected:
+            self._trade_stall_cycles = 0
+            self._prev_trades_written = stats.trades_written
+            return
+
+        if stats.trades_written == self._prev_trades_written:
+            self._trade_stall_cycles += 1
+        else:
+            self._trade_stall_cycles = 0
+        self._prev_trades_written = stats.trades_written
+
+        if self._trade_stall_cycles >= TRADE_STALL_CYCLES:
+            minutes = (self._trade_stall_cycles * self.log_interval_s) / 60.0
+            logger.error(
+                f"Trade stream appears STALLED: LIVE and ws_trade connected but "
+                f"no trades recorded for {minutes:.0f} min"
+            )
+            asyncio.create_task(self.notifier.trades_stalled(minutes))
 
