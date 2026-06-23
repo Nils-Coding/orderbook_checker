@@ -160,6 +160,8 @@ REST snapshot (after a WebSocket sequence gap or reconnection). During a resync:
 | 2026-03-26 ~08:34 UTC | ~5 hours | BUFFERING stall (sequence gap, no auto-recovery) |
 | 2026-03-27 ~13:34 - 15:08 UTC | ~1.5 hours | Service restarts for deployment |
 | 2026-03-31 ~09:14 UTC | ~3.5 hours | BUFFERING stall (fixed by deploying recovery loop) |
+| 2026-04-27 - 2026-06-23 | **trades only** | `@aggTrade` stream stopped delivering; snapshots unaffected (see 4.5) |
+| 2026-06-08 ~02:00 - 2026-06-16 ~14:00 UTC | snapshots + trades | VM disk full -> writer crashed silently (see 4.6) |
 
 Gaps are detectable by: missing `hour=XX` directories, missing part files within
 an hour, or large timestamp jumps between consecutive snapshots.
@@ -176,10 +178,32 @@ VM. This has been fixed by moving the report to a Cloud Run Job.
 ### 4.5 Trade Stream Change
 
 - **Before ~2026-03-09**: `@trade` stream (individual trades, `agg_trade_id=0`)
-- **After ~2026-03-09**: `@aggTrade` stream (aggregated, `agg_trade_id > 0`)
+- **2026-03-09 to ~2026-04-27**: `@aggTrade` stream (aggregated, `agg_trade_id > 0`)
+- **~2026-04-27 to 2026-06-23**: **no trades recorded.** The `@aggTrade` stream
+  silently stopped delivering data on the VM (the WebSocket stayed connected but
+  no messages arrived). Snapshots were unaffected, so this went unnoticed.
+- **From 2026-06-23**: reverted to the `@trade` stream (individual trades,
+  `agg_trade_id=0`), which still delivers data. `@aggTrade` remained
+  non-delivering via the `/ws/<stream>` endpoint at that time.
 
 Aggregated trades bundle all fills at the same price within a short time window
 into a single event. The total volume is identical, but the count differs.
+For `@trade` periods, `agg_trade_id`, `first_trade_id` and `last_trade_id` are `0`.
+
+### 4.6 Disk-Full Outage (2026-06-08 to 2026-06-16)
+
+The VM data disk filled up (local Parquet was synced to GCS but never pruned).
+Writes failed with `OSError(28) No space left on device`; the snapshot writer
+task died silently while the process kept running, so only a recurring
+"queue at 100%" notification appeared and no data reached the bucket.
+
+Fixed by growing the disk and hardening the recorder + sync:
+- writer/scheduler tasks are now supervised -> a fatal error exits the process
+  non-zero so systemd restarts it (instead of dying silently)
+- the sync job (`scripts/sync_to_gcs.sh`) now prunes local files older than
+  `RETENTION_DAYS` after a successful upload, so the disk no longer fills up
+- early-warning + watchdog alerts: low disk space, writer stall, a bucket
+  freshness dead-man's switch, and a trade-flow stall alert (4.5-type outages)
 
 ---
 
